@@ -54,6 +54,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdarg.h>
+#include "stm32f0xx_hal_gpio.h"
+#include "usbd_cdc_if.h"
 
 /* USER CODE END Includes */
 
@@ -64,6 +67,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// If USE_SWD_PRINTF is defined, the target device will not work without
+// ST-Link connected via SWD.
+//#define USE_SWD_PRINTF
+//#define USE_CDC_PRINTF
+//#define USE_SWD
 
 /* USER CODE END PD */
 
@@ -83,6 +91,158 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
 
+#ifdef USE_SWD_PRINTF
+extern void initialise_monitor_handles();
+#endif
+
+#ifdef USE_CDC_PRINTF
+#define printf CDC_Printf
+#endif
+
+int CDC_Printf(const char* format, ...) {
+  char buf[128];
+  va_list arg;
+  va_start(arg, format);
+  int size = vsnprintf(buf, 126, format, arg);
+  if (buf[size - 1] == '\n') {
+    buf[size - 1] = '\r';
+    buf[size] = '\n';
+    size++;
+  }
+  buf[size] = 0;
+  CDC_Puts(buf);
+  return size;
+}
+
+void ActivateAddress() {
+  HAL_GPIO_WritePin(NADR_GPIO_Port, NADR_Pin, GPIO_PIN_RESET);
+}
+
+void InactivateAddress() {
+  HAL_GPIO_WritePin(NADR_GPIO_Port, NADR_Pin, GPIO_PIN_SET);
+}
+
+void SetAddress(uint16_t address) {
+  HAL_GPIO_WritePin(ACLK_GPIO_Port, ACLK_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(ARCK_GPIO_Port, ARCK_Pin, GPIO_PIN_RESET);
+  int i;
+  for (i = 0; i < 16; ++i) {
+    HAL_GPIO_WritePin(ADAT_GPIO_Port, ADAT_Pin, (address & 0x8000) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    address <<= 1;
+    //
+    HAL_GPIO_WritePin(ACLK_GPIO_Port, ACLK_Pin, GPIO_PIN_SET);
+    //
+    HAL_GPIO_WritePin(ACLK_GPIO_Port, ACLK_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(ARCK_GPIO_Port, ARCK_Pin, GPIO_PIN_SET);
+    //
+    HAL_GPIO_WritePin(ARCK_GPIO_Port, ARCK_Pin, GPIO_PIN_RESET);
+  }
+}
+
+void ActivateData() {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
+                          |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_15
+#ifdef USE_SWD
+			  ;
+#else
+			  |GPIO_PIN_13|GPIO_PIN_14;
+#endif
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+}
+
+void InactivateData() {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
+                          |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_15
+#ifdef USE_SWD
+			  ;
+#else
+                          |GPIO_PIN_13|GPIO_PIN_14;
+#endif
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+}
+
+void ActivateControl() {
+  HAL_GPIO_WritePin(NW_GPIO_Port, NW_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(NOE_GPIO_Port, NOE_Pin, GPIO_PIN_SET);
+
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = NW_Pin|NOE_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(NW_GPIO_Port, &GPIO_InitStruct);
+}
+
+void InactivateControl() {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = NW_Pin|NOE_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(NW_GPIO_Port, &GPIO_InitStruct);
+}
+
+void LockRAM() {
+  HAL_GPIO_WritePin(Lock_GPIO_Port, Lock_Pin, GPIO_PIN_SET);
+  ActivateAddress();
+  ActivateControl();
+}
+
+void WriteRAM(uint16_t address, uint16_t data) {
+  SetAddress(address);
+
+  ActivateData();
+  uint16_t a = (data & 0x07ff) | ((data << 2) & 0xe000);
+  uint16_t f = (data >> 14) & 0x0003;
+#ifdef USE_SWD
+  GPIOA->ODR = (GPIOA->ODR & 0xffff7800) | (a & 0x87ff);
+#else
+  GPIOA->ODR = (GPIOA->ODR & 0xffff1800) | a;
+#endif
+  GPIOF->ODR = (GPIOF->ODR & 0xfffffffc) | f;
+
+  HAL_GPIO_WritePin(NW_GPIO_Port, NW_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(NW_GPIO_Port, NW_Pin, GPIO_PIN_SET);
+
+  InactivateData();
+}
+
+uint16_t ReadRAM(uint16_t address) {
+  SetAddress(address);
+  HAL_GPIO_WritePin(NOE_GPIO_Port, NOE_Pin, GPIO_PIN_RESET);
+  uint16_t a = GPIOA->IDR;
+  uint16_t f = GPIOF->IDR;
+  HAL_GPIO_WritePin(NOE_GPIO_Port, NOE_Pin, GPIO_PIN_SET);
+  return (a & 0x07ff) | ((a >> 2) & 0x3800) | (f << 14);
+}
+
+void UnlockRAM() {
+  InactivateData();
+  InactivateControl();
+  InactivateAddress();
+  HAL_GPIO_WritePin(Lock_GPIO_Port, Lock_Pin, GPIO_PIN_RESET);
+}
+
+void SetLEDOn() {
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+}
+
+void SetLEDOff() {
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+}
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -97,6 +257,9 @@ static void MX_GPIO_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+#ifdef USE_SWD_PRINTF
+  initialise_monitor_handles();
+#endif
 
   /* USER CODE END 1 */
 
@@ -125,8 +288,110 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  SetLEDOff();
+
+  uint16_t address = 0;
+  uint16_t data = 0;
+  uint16_t burst = 0;
+  uint8_t buf[64];
   while (1)
   {
+    if (CDC_GetReceivedChar() != '@') {
+      CDC_Puts("-");
+      continue;
+    }
+    switch (CDC_GetReceivedChar()) {
+    case 'L':  // LED ON
+      SetLEDOn();
+      break;
+    case 'l':  // LED OFF
+      SetLEDOff();
+      break;
+    case 'O':  // Lock
+      LockRAM();
+      break;
+    case 'C':  // Unlock
+      UnlockRAM();
+      break;
+    case 'A':  // Set address <High, Low>
+      address = (CDC_GetReceivedChar() << 8) | CDC_GetReceivedChar();
+      break;
+    case 'a':  // Reset address to 0
+      address = 0;
+      break;
+    case 'W':  // Write <Len - 1, [High, Low]+> and increment address
+      burst = CDC_GetReceivedChar() + 1;
+      for (size_t i = 0; i < burst; ++i) {
+        data = (CDC_GetReceivedChar() << 8) | CDC_GetReceivedChar();
+        WriteRAM(address++, data);
+      }
+      break;
+    case 'w':  // Write <High, Low> and increment address
+      data = (CDC_GetReceivedChar() << 8) | CDC_GetReceivedChar();
+      WriteRAM(address++, data);
+      break;
+    case 'R':  // Read <Len - 1> and increment address
+      burst = CDC_GetReceivedChar() + 1;
+      if (burst > 16) {
+        CDC_Puts("-");
+        continue;
+      }
+      buf[0] = '!';
+      for (size_t i = 0; i < burst; ++i) {
+        data = ReadRAM(address++);
+        buf[1 + i * 2] = data >> 8;
+        buf[2 + i * 2] = data;
+      }
+      buf[1 + burst * 2] = '+';
+      while (USBD_OK != CDC_Transmit_FS(buf, 2 + burst * 2));
+      continue;
+    case 'r':  // Read and increment address
+      data = ReadRAM(address++);
+      buf[0] = '!';
+      buf[1] = data >> 8;
+      buf[2] = data;
+      buf[3] = '+';
+      while (USBD_OK != CDC_Transmit_FS(buf, 4));
+      continue;
+    case 'x':
+      {
+	LockRAM();
+	for (int i = 0; i < 0x10000; ++i)
+	  WriteRAM(i, i);
+	for (int i = 0; i < 0x10000; ++i) {
+	  data = ReadRAM(i);
+	  if (data == i)
+	    continue;
+	  CDC_Printf("@$%04x: $%04x\n", i, data);
+	}
+	UnlockRAM();
+      }
+      break;
+    case 'y':
+      {
+	LockRAM();
+	for (int i = 0; i < 0x10000; ++i)
+	  WriteRAM(i, i);
+	UnlockRAM();
+      }
+      break;
+    case 'z':
+      {
+	LockRAM();
+	for (int i = 0; i < 0x10000; ++i) {
+	  data = ReadRAM(i);
+	  if (data == i)
+	    continue;
+	  CDC_Printf("@$%04x: $%04x\n", i, data);
+	}
+	UnlockRAM();
+      }
+      break;
+    default:
+      CDC_Puts("-");
+      continue;
+    }
+    CDC_Puts("+");
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -203,7 +468,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_Pin|ADAT_Pin|ACLK_Pin|ARCK_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_Pin|ADAT_Pin|ACLK_Pin|ARCK_Pin 
+                          |Lock_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(NADR_GPIO_Port, NADR_Pin, GPIO_PIN_SET);
@@ -220,25 +486,31 @@ static void MX_GPIO_Init(void)
                            PA14 PA15 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3 
                           |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7 
-                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_13 
-                          |GPIO_PIN_14|GPIO_PIN_15;
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_15
+#ifdef USE_SWD
+			  ;
+#else
+			  |GPIO_PIN_13|GPIO_PIN_14;
+#endif
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_Pin ADAT_Pin ACLK_Pin ARCK_Pin */
-  GPIO_InitStruct.Pin = LED_Pin|ADAT_Pin|ACLK_Pin|ARCK_Pin;
+  /*Configure GPIO pin : LED_Pin */
+  GPIO_InitStruct.Pin = LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : NADR_Pin */
-  GPIO_InitStruct.Pin = NADR_Pin;
+  /*Configure GPIO pins : ADAT_Pin ACLK_Pin ARCK_Pin NADR_Pin 
+                           Lock_Pin */
+  GPIO_InitStruct.Pin = ADAT_Pin|ACLK_Pin|ARCK_Pin|NADR_Pin 
+                          |Lock_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(NADR_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : NW_Pin NOE_Pin */
   GPIO_InitStruct.Pin = NW_Pin|NOE_Pin;

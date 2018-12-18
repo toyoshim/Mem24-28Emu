@@ -10,7 +10,7 @@
   * inserted by the user or by software development tools
   * are owned by their respective copyright owners.
   *
-  * Copyright (c) 2018 STMicroelectronics International N.V. 
+  * Copyright (c) 2019 STMicroelectronics International N.V. 
   * All rights reserved.
   *
   * Redistribution and use in source and binary forms, with or without 
@@ -93,8 +93,8 @@
 /* USER CODE BEGIN PRIVATE_DEFINES */
 /* Define size for the receive and transmit buffer over CDC */
 /* It's up to user to redefine and/or remove those define */
-#define APP_RX_DATA_SIZE  128
-#define APP_TX_DATA_SIZE  16
+#define APP_RX_DATA_SIZE  64
+#define APP_TX_DATA_SIZE  64
 /* USER CODE END PRIVATE_DEFINES */
 
 /**
@@ -127,6 +127,12 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
+#define INTERNAL_RX_DATA_SIZE 1024
+volatile uint8_t InternalRxBuffer[INTERNAL_RX_DATA_SIZE];
+volatile uint16_t RxBufferAvailableLength = 0;
+volatile uint8_t RxBufferAvailableLengthLock = 0;
+volatile uint16_t RxBufferWriteOffset = 0;
+volatile uint16_t RxBufferReadOffset = 0;
 
 /* USER CODE END PRIVATE_VARIABLES */
 
@@ -291,7 +297,17 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+  while ((RxBufferAvailableLength + *Len) > INTERNAL_RX_DATA_SIZE);
+  uint32_t remaining = *Len;
+  do {
+    InternalRxBuffer[RxBufferWriteOffset++] = *Buf++;
+    if (RxBufferWriteOffset == INTERNAL_RX_DATA_SIZE)
+      RxBufferWriteOffset = 0;
+  } while (--remaining);
+  RxBufferAvailableLengthLock = 1;
+  RxBufferAvailableLength += *Len;
+  RxBufferAvailableLengthLock = 0;
+
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);
   /* USER CODE END 6 */
@@ -316,13 +332,35 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
+//  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
+  memcpy(UserTxBufferFS, Buf, Len);
+  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
   /* USER CODE END 7 */
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+uint8_t CDC_GetReceivedChar()
+{
+  while (!RxBufferAvailableLength);
+  int result = InternalRxBuffer[RxBufferReadOffset++];
+
+  __disable_irq();
+  while(RxBufferAvailableLengthLock);
+  RxBufferAvailableLength--;
+  __enable_irq();
+  if (RxBufferReadOffset == INTERNAL_RX_DATA_SIZE)
+    RxBufferReadOffset = 0;
+  return result;
+}
+
+void CDC_Puts(char* Str)
+{
+  uint16_t len = strlen(Str);
+  while (USBD_OK != CDC_Transmit_FS((uint8_t*)Str, len));
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
