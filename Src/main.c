@@ -91,6 +91,18 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
 
+int boot_to_dfu = 0;
+
+void __initialize_hardware_early(void)
+{
+  if (boot_to_dfu) {
+    boot_to_dfu = 0;
+    ((void (*)(void))0x1fffc400)();
+  } else {
+    SystemInit();
+  }
+}
+
 #ifdef USE_SWD_PRINTF
 extern void initialise_monitor_handles();
 #endif
@@ -181,7 +193,7 @@ void ActivateControl() {
 
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   GPIO_InitStruct.Pin = NW_Pin|NOE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(NW_GPIO_Port, &GPIO_InitStruct);
 }
@@ -243,6 +255,22 @@ void SetLEDOff() {
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 }
 
+void ActivateSWD() {
+  HAL_GPIO_WritePin(Lock_GPIO_Port, Lock_Pin, GPIO_PIN_SET);
+
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Alternate = GPIO_AF0_SWDIO;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Alternate = GPIO_AF0_SWCLK;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -306,6 +334,13 @@ int main(void)
       break;
     case 'l':  // LED OFF
       SetLEDOff();
+      break;
+    case 'B':  // Boot to DFU
+      boot_to_dfu = 1;
+      NVIC_SystemReset();
+      break;
+    case 'S':  // Activate SWD
+      ActivateSWD();
       break;
     case 'O':  // Lock
       LockRAM();

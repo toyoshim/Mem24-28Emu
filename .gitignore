@@ -1,4 +1,4 @@
 .mxproject
 Debug
 Release
-debug.cfg
+*.cfg
